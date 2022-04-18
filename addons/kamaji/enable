@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -e
+
+source $SNAP/actions/common/utils.sh
+
+
+CURRENT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)
+KUBECTL="$SNAP/kubectl --kubeconfig=${SNAP_DATA}/credentials/client.config"
+
+echo "Enabling Kamaji"
+
+source $CURRENT_DIR/../common/utils.sh
+source $CURRENT_DIR/etcd
+etcd-installation
+
+echo "Installing Kamaji"
+use_addon_manifest kamaji/kamaji apply
+
+echo "Kamaji is enabled"

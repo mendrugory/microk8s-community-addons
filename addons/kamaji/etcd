@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+function get_cfssl() {
+    echo "Retrieving cfssl"
+    curl -L https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssl_1.5.0_linux_amd64 -o /usr/bin/cfssl
+    chmod +x /usr/bin/cfssl
+    echo "Retrieving cfssljson"
+    curl -L https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssljson_1.5.0_linux_amd64 -o /usr/bin/cfssljson
+    chmod +x /usr/bin/cfssljson
+}
+
+function certificates() {
+    echo "Generating etcd certificates"
+	mkdir -p /tmp/kamaji/certs
+	cfssl gencert -initca ca-csr.json | cfssljson -bare certs/ca
+	mv certs/ca.pem certs/ca.crt
+	mv certs/ca-key.pem certs/ca.key
+	cfssl gencert -ca=certs/ca.crt -ca-key=certs/ca.key \
+		-config=config.json \
+		-profile=peer-authentication peer-csr.json | cfssljson -bare certs/peer
+	cfssl gencert -ca=certs/ca.crt -ca-key=certs/ca.key \
+		-config=config.json \
+		-profile=peer-authentication server-csr.json | cfssljson -bare certs/server
+	cfssl gencert -ca=certs/ca.crt -ca-key=certs/ca.key \
+		-config=config.json \
+		-profile=client-authentication root-client-csr.json | cfssljson -bare certs/root-client	
+}
+
+function etcd-cluster-install() {
+    echo "Installing etcd cluster"
+    
+	$KUBECTL -n kamaji-system apply -f etcd-cluster.yaml
+
+	$KUBECTL -n kamaji-system create secret generic etcd-certs \
+		--from-file=certs/ca.crt \
+		--from-file=certs/ca.key \
+		--from-file=certs/peer-key.pem --from-file=certs/peer.pem \
+		--from-file=certs/server-key.pem --from-file=certs/server.pem
+
+	$KUBECTL -n kamaji-system create secret tls root-client-certs \
+        --key=certs/root-client-key.pem \
+		--cert=certs/root-client.pem
+
+	echo "Wait the etcd instances discover each other and the cluster is formed"
+	$KUBECTL wait pod --for=condition=ready -n kamaji-system -l app=etcd --timeout=120s
+	echo -ne "\nChecking endpoint's health..."
+	$KUBECTL -n kamaji-system exec etcd-root-client -- /bin/bash -c "etcdctl endpoint health 1>/dev/null 2>/dev/null; until [ $? -eq 0 ]; do sleep 10; printf "."; etcdctl endpoint health 1>/dev/null 2>/dev/null; done;"
+	echo -ne "\netcd cluster's health:\n"
+	$KUBECTL -n kamaji-system exec etcd-root-client -- /bin/bash -c "etcdctl endpoint health"
+	echo -ne "\nWaiting for all members..."
+	$KUBECTL -n kamaji-system exec etcd-root-client -- /bin/bash -c "until [ $(etcdctl member list 2>/dev/null | wc -l) -eq 3 ]; do sleep 10; printf '.'; done;"
+	echo -ne "\netcd's members:\n"
+	$KUBECTL -n kamaji-system exec etcd-root-client -- /bin/bash -c "etcdctl member list -w table"
+}
+
+function etcd-enable-multitenancy() {
+    echo "Allowing etcd multitenancy"
+	$KUBECTL -n kamaji-system exec etcd-root-client -- /bin/bash -c "etcdctl user add --no-password=true root;etcdctl role add root;etcdctl user grant-role root root;etcdctl auth enable"
+}
+
+function etcd-installation() {
+    echo "Installing ETCD multitenancy"
+    mkdir -p /tmp/kamaji
+    cp $CURRENT_DIR/*.json /tmp/kamaji
+    cp $CURRENT_DIR/*.yaml /tmp/kamaji
+    cd /tmp/kamaji
+    get_cfssl
+    certificates 
+    etcd-cluster-install 
+    etcd-enable-multitenancy
+    cd -
+}
